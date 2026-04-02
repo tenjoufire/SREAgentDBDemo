@@ -1,0 +1,27 @@
+# .NET build artifacts
+**/bin/
+**/obj/
+
+# Test and packaging output
+TestResults/
+artifacts/
+
+# Visual Studio / Rider / VS Code user files
+.vs/
+.idea/
+.vscode/
+*.suo
+*.user
+*.userosscache
+*.rsuser
+
+# Azure Developer CLI local state
+.azure/
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# Bicep generated ARM template
+db-latency/infra/main.json
