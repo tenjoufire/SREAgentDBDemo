@@ -19,6 +19,10 @@ param(
     [int]$RequestCount = 200,
 
     [Parameter()]
+    [ValidateRange(1, 100)]
+    [int]$MaxConcurrency = 1,
+
+    [Parameter()]
     [string]$SqlServerName,
 
     [Parameter()]
@@ -37,7 +41,8 @@ param(
 . (Join-Path $PSScriptRoot 'scenario3-common.ps1')
 
 function Generate-Traffic {
-    Write-Step "🔥 トラフィック生成（$RequestCount リクエスト）"
+    $modeLabel = if ($MaxConcurrency -gt 1) { "並列 $MaxConcurrency" } else { '直列' }
+    Write-Step "🔥 トラフィック生成（$RequestCount リクエスト / $modeLabel）"
 
     $baseUrl = Get-ApplicationBaseUrl
     $endpoints = @(
@@ -50,70 +55,120 @@ function Generate-Traffic {
         '/api/orders/100'
     )
 
-    $totalSuccess = 0
-    $totalSlow = 0
-    $totalError = 0
-    $sqlTotalMs = 0
-    $cosmosTotalMs = 0
-    $sqlCount = 0
-    $cosmosCount = 0
-
     Write-Host "ターゲット: $baseUrl"
+    if ($MaxConcurrency -gt 1) {
+        Write-Host "実行モード: 並列 ${MaxConcurrency}" -ForegroundColor Gray
+    }
 
-    for ($i = 0; $i -lt $RequestCount; $i++) {
-        $endpoint = $endpoints[$i % $endpoints.Count]
-        $requestUrl = "$baseUrl$endpoint"
-        $isSql = $endpoint -like '/api/orders*'
-
-        try {
+    $results = if ($MaxConcurrency -gt 1) {
+        1..$RequestCount | ForEach-Object -ThrottleLimit $MaxConcurrency -Parallel {
+            $index = $_ - 1
+            $localBaseUrl = $using:baseUrl
+            $localEndpoints = $using:endpoints
+            $endpoint = $localEndpoints[$index % $localEndpoints.Count]
+            $requestUrl = "$localBaseUrl$endpoint"
+            $isSql = $endpoint -like '/api/orders*'
             $sw = [System.Diagnostics.Stopwatch]::StartNew()
-            $response = Invoke-WebRequest -Uri $requestUrl -Method Get -UseBasicParsing -TimeoutSec 60
-            $sw.Stop()
-            $latency = $sw.ElapsedMilliseconds
 
-            if ($isSql) {
-                $sqlTotalMs += $latency
-                $sqlCount++
-            }
-            else {
-                $cosmosTotalMs += $latency
-                $cosmosCount++
-            }
+            try {
+                $response = Invoke-WebRequest -Uri $requestUrl -Method Get -UseBasicParsing -TimeoutSec 60
+                $sw.Stop()
 
-            if ($response.StatusCode -ge 500) {
-                $totalError++
-                Write-Host "  ❌ [$($response.StatusCode)] $endpoint (${latency}ms)" -ForegroundColor Red
+                [pscustomobject]@{
+                    Endpoint = $endpoint
+                    LatencyMs = [int]$sw.ElapsedMilliseconds
+                    StatusCode = [int]$response.StatusCode
+                    IsSql = $isSql
+                    Error = $null
+                }
             }
-            elseif ($latency -gt 3000) {
-                $totalSlow++
-                Write-Host "  ⚠️  [SLOW ${latency}ms] $endpoint" -ForegroundColor Yellow
+            catch {
+                $sw.Stop()
+                $statusCode = 0
+                if ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
+                    $statusCode = [int]$_.Exception.Response.StatusCode
+                }
+
+                [pscustomobject]@{
+                    Endpoint = $endpoint
+                    LatencyMs = [int]$sw.ElapsedMilliseconds
+                    StatusCode = $statusCode
+                    IsSql = $isSql
+                    Error = $_.Exception.Message
+                }
             }
-            else {
-                $totalSuccess++
+        }
+    }
+    else {
+        $serialResults = [System.Collections.Generic.List[object]]::new()
+
+        for ($i = 0; $i -lt $RequestCount; $i++) {
+            $endpoint = $endpoints[$i % $endpoints.Count]
+            $requestUrl = "$baseUrl$endpoint"
+            $isSql = $endpoint -like '/api/orders*'
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+
+            try {
+                $response = Invoke-WebRequest -Uri $requestUrl -Method Get -UseBasicParsing -TimeoutSec 60
+                $sw.Stop()
+
+                $serialResults.Add([pscustomobject]@{
+                    Endpoint = $endpoint
+                    LatencyMs = [int]$sw.ElapsedMilliseconds
+                    StatusCode = [int]$response.StatusCode
+                    IsSql = $isSql
+                    Error = $null
+                })
+            }
+            catch {
+                $sw.Stop()
+                $statusCode = 0
+                if ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
+                    $statusCode = [int]$_.Exception.Response.StatusCode
+                }
+
+                $serialResults.Add([pscustomobject]@{
+                    Endpoint = $endpoint
+                    LatencyMs = [int]$sw.ElapsedMilliseconds
+                    StatusCode = $statusCode
+                    IsSql = $isSql
+                    Error = $_.Exception.Message
+                })
             }
 
             if ($i % 20 -eq 0) {
-                $sqlAvg = if ($sqlCount -gt 0) { [math]::Round($sqlTotalMs / $sqlCount) } else { 0 }
-                $cosmosAvg = if ($cosmosCount -gt 0) { [math]::Round($cosmosTotalMs / $cosmosCount) } else { 0 }
-                Write-Host "  📊 [$($i + 1)/$RequestCount] SQL avg=${sqlAvg}ms | Cosmos avg=${cosmosAvg}ms | Slow=$totalSlow Err=$totalError" -ForegroundColor Gray
+                $currentResults = @($serialResults)
+                $currentSql = @($currentResults | Where-Object { $_.IsSql })
+                $currentCosmos = @($currentResults | Where-Object { -not $_.IsSql })
+                $currentErrors = @($currentResults | Where-Object { $_.StatusCode -eq 0 -or $_.StatusCode -ge 500 })
+                $currentSlow = @($currentResults | Where-Object { $_.StatusCode -gt 0 -and $_.StatusCode -lt 500 -and $_.LatencyMs -gt 3000 })
+                $sqlAvg = if ($currentSql.Count -gt 0) { [math]::Round((($currentSql | Measure-Object -Property LatencyMs -Average).Average)) } else { 0 }
+                $cosmosAvg = if ($currentCosmos.Count -gt 0) { [math]::Round((($currentCosmos | Measure-Object -Property LatencyMs -Average).Average)) } else { 0 }
+                Write-Host "  📊 [$($i + 1)/$RequestCount] SQL avg=${sqlAvg}ms | Cosmos avg=${cosmosAvg}ms | Slow=$($currentSlow.Count) Err=$($currentErrors.Count)" -ForegroundColor Gray
             }
-        }
-        catch {
-            $totalError++
+
+            Start-Sleep -Milliseconds 200
         }
 
-        Start-Sleep -Milliseconds 200
+        $serialResults
     }
 
-    $sqlAvgFinal = if ($sqlCount -gt 0) { [math]::Round($sqlTotalMs / $sqlCount) } else { 0 }
-    $cosmosAvgFinal = if ($cosmosCount -gt 0) { [math]::Round($cosmosTotalMs / $cosmosCount) } else { 0 }
+    $results = @($results)
+    $errorResults = @($results | Where-Object { $_.StatusCode -eq 0 -or $_.StatusCode -ge 500 })
+    $slowResults = @($results | Where-Object { $_.StatusCode -gt 0 -and $_.StatusCode -lt 500 -and $_.LatencyMs -gt 3000 })
+    $successResults = @($results | Where-Object { $_.StatusCode -gt 0 -and $_.StatusCode -lt 500 -and $_.LatencyMs -le 3000 })
+    $sqlResults = @($results | Where-Object { $_.IsSql })
+    $cosmosResults = @($results | Where-Object { -not $_.IsSql })
+
+    $sqlAvgFinal = if ($sqlResults.Count -gt 0) { [math]::Round((($sqlResults | Measure-Object -Property LatencyMs -Average).Average)) } else { 0 }
+    $cosmosAvgFinal = if ($cosmosResults.Count -gt 0) { [math]::Round((($cosmosResults | Measure-Object -Property LatencyMs -Average).Average)) } else { 0 }
 
     Write-Host "`n--- トラフィック生成結果 ---" -ForegroundColor Yellow
-    Write-Host "  成功: $totalSuccess"
-    Write-Host "  スロー (>3s): $totalSlow"
-    Write-Host "  エラー: $totalError"
-    Write-Host "  SQL 平均応答: ${sqlAvgFinal}ms ($sqlCount 件)"
-    Write-Host "  Cosmos DB 平均応答: ${cosmosAvgFinal}ms ($cosmosCount 件)"
+    Write-Host "  成功: $($successResults.Count)"
+    Write-Host "  スロー (>3s): $($slowResults.Count)"
+    Write-Host "  エラー: $($errorResults.Count)"
+    Write-Host "  SQL 平均応答: ${sqlAvgFinal}ms ($($sqlResults.Count) 件)"
+    Write-Host "  Cosmos DB 平均応答: ${cosmosAvgFinal}ms ($($cosmosResults.Count) 件)"
 
     if ($sqlAvgFinal -gt $cosmosAvgFinal * 3) {
         Write-Host "`n  💡 SQL の応答時間が Cosmos DB の 3 倍以上 → DB 層が原因の可能性大" -ForegroundColor Cyan

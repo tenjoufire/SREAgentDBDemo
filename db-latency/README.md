@@ -243,15 +243,21 @@ pwsh ./scripts/simulate-slow-query.ps1 `
 
 このアプリは、環境変数の切り替えなしで `GET /api/orders` と関連する注文系 API に対して N+1 的な重い処理を実行します。ここでは追加トラフィックを流して SQL 側の遅延を可視化します。
 
-調査用のトラフィックを追加で流します。
+調査用のトラフィックを追加で流します。このシナリオでは、再現性を高めるため `並列 20 / 総リクエスト 200` を標準の調査負荷として使います。
 
 ```powershell
 pwsh ./scripts/simulate-slow-query.ps1 `
   -ResourceGroupName $RESOURCE_GROUP `
   -AppName $APP_NAME `
   -Action generate-traffic `
-  -RequestCount 200
+  -RequestCount 200 `
+  -MaxConcurrency 20
 ```
+
+補足:
+
+- `simulate-slow-query.ps1` は `-MaxConcurrency` 未指定時は直列実行です。
+- 注文系 API の遅延を観察したい場合は、まずこの `並列 20 / 総 200` を基準にしてください。
 
 想定される出力例:
 
@@ -338,7 +344,8 @@ pwsh ./scripts/simulate-slow-query.ps1 `
   -ResourceGroupName $RESOURCE_GROUP `
   -AppName $APP_NAME `
   -Action generate-traffic `
-  -RequestCount 50
+  -RequestCount 200 `
+  -MaxConcurrency 20
 ```
 
 完全復旧には、次のステップで扱うコード修正と再デプロイが必要です。
@@ -613,14 +620,15 @@ Evaluation で返されるスコア:
 Playground でのテストが完了したら、実際のチャットスレッドでカスタムエージェントを使います。
 
 1. Azure SRE Agent のチャットに戻る
-2. 改めてトラフィックを流して遅延を発生させる
+2. 改めてステップ 7 と同じ条件でトラフィックを流して遅延を発生させる
 
 ```powershell
 pwsh ./scripts/simulate-slow-query.ps1 `
   -ResourceGroupName $RESOURCE_GROUP `
   -AppName $APP_NAME `
   -Action generate-traffic `
-  -RequestCount 100
+  -RequestCount 200 `
+  -MaxConcurrency 20
 ```
 
 3. チャットで `/agent` と入力し、`database-expert` を選ぶ

@@ -434,17 +434,58 @@ static string BuildSqlConnectionString(IConfiguration config)
 static async Task<OrderItemSummary> LoadOrderItemSummaryAsync(SqlConnection db, int orderId)
 {
     var sql = """
+        DECLARE @NormalizedOrderIdText NVARCHAR(20) = RIGHT(REPLICATE('0', 20) + @OrderIdText, 20);
+
         SELECT
-                COUNT(*) AS LineItemCount,
-                ISNULL(SUM(Quantity), 0) AS Units,
-                ISNULL(SUM(LineTotal), 0) AS ItemsTotal,
-                MAX(CreatedAt) AS LastItemUpdatedAt
-        FROM OrderItems
-        WHERE CAST(OrderId AS NVARCHAR(20)) = @OrderIdText
-            AND LOWER(ItemStatus) <> 'cancelled'
+                (
+                    SELECT COUNT(*)
+                    FROM OrderItems oiCount
+                    WHERE RIGHT(REPLICATE('0', 20) + CAST(oiCount.OrderId AS NVARCHAR(20)), 20) = @NormalizedOrderIdText
+                        AND LOWER(LTRIM(RTRIM(oiCount.ItemStatus))) <> 'cancelled'
+                ) AS LineItemCount,
+                ISNULL((
+                    SELECT SUM(CASE WHEN oiQuantity.Quantity > 0 THEN oiQuantity.Quantity ELSE 0 END)
+                    FROM OrderItems oiQuantity
+                    WHERE RIGHT(REPLICATE('0', 20) + CAST(oiQuantity.OrderId AS NVARCHAR(20)), 20) = @NormalizedOrderIdText
+                        AND LOWER(LTRIM(RTRIM(oiQuantity.ItemStatus))) <> 'cancelled'
+                ), 0) AS Units,
+                ISNULL((
+                    SELECT SUM(CASE WHEN oiTotal.LineTotal > 0 THEN oiTotal.LineTotal ELSE 0 END)
+                    FROM OrderItems oiTotal
+                    WHERE RIGHT(REPLICATE('0', 20) + CAST(oiTotal.OrderId AS NVARCHAR(20)), 20) = @NormalizedOrderIdText
+                        AND LOWER(LTRIM(RTRIM(oiTotal.ItemStatus))) <> 'cancelled'
+                ), 0) AS ItemsTotal,
+                (
+                    SELECT MAX(oiLast.CreatedAt)
+                    FROM OrderItems oiLast
+                    WHERE RIGHT(REPLICATE('0', 20) + CAST(oiLast.OrderId AS NVARCHAR(20)), 20) = @NormalizedOrderIdText
+                        AND LOWER(LTRIM(RTRIM(oiLast.ItemStatus))) <> 'cancelled'
+                ) AS LastItemUpdatedAt,
+                (
+                    SELECT SUM(
+                        ABS(CHECKSUM(CONCAT(
+                            oiNoise.Sku,
+                            ':',
+                            recentOrders.CustomerName,
+                            ':',
+                            LOWER(oiNoise.ItemStatus),
+                            ':',
+                            CAST(oiNoise.OrderId AS NVARCHAR(20)),
+                            ':',
+                            CONVERT(NVARCHAR(30), oiNoise.CreatedAt, 126)))) % 17)
+                    FROM OrderItems oiNoise
+                    CROSS JOIN (
+                        SELECT TOP 25 Id, CustomerName
+                        FROM Orders
+                        ORDER BY CreatedAt DESC
+                    ) recentOrders
+                    WHERE LEN(oiNoise.Sku) > 0
+                ) AS WastefulChecksum
+        OPTION (RECOMPILE)
         """;
 
     using var cmd = new SqlCommand(sql, db);
+    cmd.CommandTimeout = 60;
     cmd.Parameters.AddWithValue("@OrderIdText", orderId.ToString());
 
     using var reader = await cmd.ExecuteReaderAsync(CommandBehavior.SingleRow);
