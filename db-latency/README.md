@@ -5,13 +5,14 @@
 
 ## 概要
 
-- 所要時間: 90 から 120 分
+- 所要時間: 120 から 150 分
 - 難易度: 中級から上級
 - 主なサービス: Azure Container Apps, Azure SQL Database, Azure Cosmos DB for NoSQL, Application Insights, Azure Monitor, Azure SRE Agent
 - ゴール:
   - azd でアプリ基盤とデモアプリをまとめてデプロイする
   - Azure portal で Azure SRE Agent を作成し、監視対象リソースグループを関連付ける
   - 負荷注入後に Azure SQL と Cosmos DB のどちらが遅延の主因かを切り分ける
+  - Agent Canvas でスキルとカスタムエージェントを作成し、ドメイン特化の調査を体験する
 
 ## このシナリオで押さえる前提
 
@@ -436,6 +437,223 @@ pwsh ./scripts/simulate-blocking.ps1 `
   -HoldSeconds 30
 ```
 
+## ステップ 12: Agent Canvas でエージェント構成を確認する
+
+Azure SRE Agent ポータルには **Agent Canvas** というビジュアルビルダーがあり、カスタムエージェント、スキル、ツール、トリガーをノードとして可視化できます。ここまでのワークショップでは SRE Agent のチャット機能を使いましたが、ここからは Builder 側の拡張機能を体験します。
+
+1. Azure SRE Agent ポータル (https://sre.azure.com) で対象エージェントを開く
+2. 左ナビゲーションから **Builder** を選ぶ
+3. **Agent Canvas** タブを開く
+
+Agent Canvas には次の 3 つのビューがあります。
+
+| ビュー | 用途 |
+|---|---|
+| Canvas view | カスタムエージェント、ツール、トリガーの接続をビジュアルダイアグラムで表示する |
+| Table view | すべてのカスタムエージェントを一覧で表示し、素早くアクセスする |
+| Test playground | 対話的なテスト環境でカスタムエージェントやツールを検証する |
+
+チェックポイント:
+
+- Agent Canvas が表示され、まだカスタムエージェントやスキルが未作成の初期状態であることを確認する
+
+## ステップ 13: スキルを作成する
+
+**スキル** は、エージェントが自動的に読み込むモジュール式の手順書です。`/skill` のような明示的なコマンドは不要で、ユーザーの質問に関連するスキルをエージェントが自動で選択して適用します。このステップでは、ワークショップのシナリオに合わせた SQL スロークエリ トラブルシューティング用のスキルを作成します。
+
+1. **Builder** > **Agent Canvas** を開く
+2. ツールバーの **Create** ドロップダウンから **Skill** を選ぶ
+3. スキル作成ダイアログが開く。左側にフォームフィールド、右側に `SKILL.md` のコードエディターが表示される
+4. 次の値を入力する
+
+| フィールド | 値 |
+|---|---|
+| Name | `sql-slow-query-troubleshooting` |
+| Description | `Azure SQL Database のスロークエリと高 CPU アラートのトラブルシューティング手順。N+1 問題、インデックス不足、blocking を調査し、緩和策と恒久対策を提案する。` |
+
+5. `SKILL.md` のコードエディターに以下の内容を入力する
+
+```yaml
+---
+name: sql-slow-query-troubleshooting
+description: Azure SQL Database のスロークエリと高 CPU アラートのトラブルシューティング手順
+tools:
+  - execute_kusto_query
+---
+
+## When to use this skill
+Use this skill when:
+- Azure SQL Database の応答が遅いというアラートや質問を受けたとき
+- Application Insights で SQL dependency の duration が長いと報告されたとき
+- CPU 使用率が高い、または blocking が発生している疑いがあるとき
+
+## Steps
+1. Application Insights の Performance > Dependencies で SQL dependency の平均 duration を確認する
+2. 遅い SQL dependency のサンプルを Drill into し、End-to-end transaction details でクエリの内容を確認する
+3. 同じトランザクション内の Cosmos DB dependency と比較して、SQL が支配的かを判断する
+4. Azure SQL Database の Metrics で cpu_percent、dtu_consumption_percent を確認する
+5. blocking が疑われる場合は sys.dm_exec_requests と sys.dm_tran_locks を確認する
+6. N+1 パターン（同一トランザクション内で多数の類似クエリ）を特定する
+7. 即時緩和策を提案する: SKU 引き上げ、問題クエリの一時無効化、blocking セッションの kill
+8. 恒久対策を提案する: N+1 解消、インデックス追加、クエリの最適化
+
+## Expected output
+以下を含む構造化レポート:
+- 影響を受けているリソースとエンドポイント
+- 根本原因の分類（N+1、インデックス不足、blocking、リソース不足）
+- 即時緩和策と恒久対策の区別
+- 根拠となるメトリクスやトランザクションのサマリー
+```
+
+6. (オプション) **Choose tools** で `execute_kusto_query` を追加する
+7. **Create** を選んでスキルを保存する
+
+スキルとナレッジドキュメントの違い:
+
+| 種類 | 役割 |
+|---|---|
+| スキル | エージェントに「どうやるか」を教える（手順、プレイブック） |
+| ナレッジドキュメント | エージェントに「何を知るべきか」を教える（参照データ、アーキテクチャ文書） |
+
+補足:
+
+- スキルは最大 5 つまで同時にアクティブになります。制限を超えると最も古いスキルが自動的にアンロードされます。
+- スキルの description が重要です。エージェントは description を読んでどのスキルを使うか判断します。
+
+チェックポイント:
+
+- Agent Canvas の Skills タブに `sql-slow-query-troubleshooting` が表示されている
+- スキルが正しく作成されたことをダイアログまたは一覧で確認できる
+
+## ステップ 14: カスタムエージェント（サブエージェント）を作成する
+
+**カスタムエージェント** はオンデマンドで呼び出す専門家エージェントです。メインエージェントがすべてを処理する代わりに、特定ドメインの専門知識、ツール、手順をパッケージ化して委譲できます。チャットで `/agent` コマンドを使って明示的に呼び出します。
+
+スキルとカスタムエージェントの違い:
+
+| 機能 | スキル | カスタムエージェント |
+|---|---|---|
+| アクセス方法 | 自動（関連する質問で自動的に読み込まれる） | 明示的（`/agent` コマンドで呼び出す） |
+| ツール | アタッチ可能 | 専用のツールセットを持つ |
+| 最適な用途 | チーム共通の手順書 | ドメイン特化の専門家 |
+
+このステップでは、ワークショップのデータベース調査に特化したカスタムエージェントを作成します。
+
+1. **Builder** > **Agent Canvas** を開く
+2. **Create** をクリックする
+3. **Custom Agent** を選ぶ
+4. 次の値を入力する
+
+| フィールド | 値 |
+|---|---|
+| Name | `database-expert` |
+| Instructions | `あなたはデータベースの専門家です。Azure SQL Database と Cosmos DB for NoSQL のパフォーマンス分析、接続の問題の診断、クエリの最適化を担当します。調査では Application Insights のトランザクション診断を活用し、SQL と Cosmos DB の依存関係を比較して、どちらがボトルネックかを切り分けてください。即時緩和策と恒久対策を区別して提案してください。` |
+| Handoff Description | `SQL および Cosmos DB のパフォーマンス問題やデータベーストラブルシューティングが必要なときに処理を引き受ける` |
+
+5. **Choose tools** で次のツールを選ぶ
+   - `execute_kusto_query` (Application Insights / Log Analytics のクエリ用)
+   - `RunAzCliReadCommands` (Azure リソース情報の取得用)
+
+6. (オプション) **Choose skills** で先ほど作成した `sql-slow-query-troubleshooting` を選ぶ。特定のスキルを選択すると、グローバルの既定値がオーバーライドされ、選択したスキルだけがこのカスタムエージェントで利用可能になる
+7. (オプション) **Knowledge base** を有効にして、このワークショップのアーキテクチャ情報やトラブルシューティングガイドをアップロードする
+8. **Create** を選ぶ
+
+作成したカスタムエージェントが Agent Canvas にノードとして表示されます。
+
+補足:
+
+- カスタムエージェントはメインエージェントと **会話コンテキストを共有** します。ハンドオフ時にクリーンな状態にはならず、それまでの会話履歴すべてを引き継ぎます。
+- カスタムエージェントには **Review**（提案してから承認を待つ）と **Autonomous**（承認なしで実行する）の 2 つのモードがあります。リスクに応じて使い分けてください。ワークショップでは **Review** を推奨します。
+- YAML タブに切り替えると、構成をコードとして表示・編集できます。
+
+チェックポイント:
+
+- Agent Canvas に `database-expert` ノードが表示されている
+- 割り当てたツールがノードに接続されて表示されている
+
+## ステップ 15: Agent Playground でテストする
+
+**Agent Playground** は、カスタムエージェントやスキルを本番スレッドに影響を与えずにテストできる分離された環境です。スプリットスクリーン レイアウトで、左側にエディター、右側にチャットテストパネルが表示されます。
+
+1. **Builder** > **Agent Canvas** のツールバーから **Test playground** ビューを選ぶ
+2. **Custom agent/Tool** ドロップダウンから `database-expert` を選ぶ
+3. スプリットスクリーンの左側でカスタムエージェントの構成を確認する
+4. 右側のチャットパネルでテストプロンプトを入力する
+
+テストプロンプト例:
+
+- `リソースグループ内の Azure SQL Database の CPU 使用率を確認してください`
+- `GET /api/orders が遅い原因を調査してください。SQL と Cosmos DB のどちらが問題ですか？`
+- `SQL の blocking が発生しているか確認してください`
+
+5. エージェントがスキル `sql-slow-query-troubleshooting` の手順に従って調査することを確認する
+6. (オプション) **Evaluation** タブで **Evaluate** を選んで AI によるクオリティスコアを確認する
+
+Evaluation で返されるスコア:
+
+| スコア | 測定内容 |
+|---|---|
+| Overall | 総合品質スコア (0–100) |
+| Intent match | エージェントの動作がゴールにどれだけ合致しているか (1–5) |
+| Completeness | ロール、ゴール、運用ガイダンスをカバーしているか |
+| Tool fit | 適切なツールが構成されているか |
+| Prompt clarity | 指示がどれだけ明確で実行可能か |
+| Safety | エラーハンドリング、確認プロンプト、セーフガード |
+
+7. スコアが低い項目があれば **Review and apply** でクイックフィックスを確認し、必要に応じて適用する
+8. **Refine with AI** を使って Instructions を AI に改善させることもできる
+
+チェックポイント:
+
+- Playground でカスタムエージェントが応答し、SQL トラブルシューティングの手順に従っている
+- ツールの呼び出し結果が表示されている
+
+## ステップ 16: カスタムエージェントをチャットから呼び出す
+
+Playground でのテストが完了したら、実際のチャットスレッドでカスタムエージェントを使います。
+
+1. Azure SRE Agent のチャットに戻る
+2. 改めてトラフィックを流して遅延を発生させる
+
+```powershell
+pwsh ./scripts/simulate-slow-query.ps1 `
+  -ResourceGroupName $RESOURCE_GROUP `
+  -AppName $APP_NAME `
+  -Action generate-traffic `
+  -RequestCount 100
+```
+
+3. チャットで `/agent` と入力し、`database-expert` を選ぶ
+4. 次のプロンプトで調査を依頼する
+
+おすすめプロンプト:
+
+- `/agent database-expert` を選択後: `このアプリで今発生している遅延の原因を調査してください。SQL と Cosmos DB のどちらがボトルネックか切り分けてください。`
+- `GET /api/orders のトランザクション診断を確認して、N+1 クエリが発生しているか調べてください。`
+- `即時の緩和策と恒久対策をそれぞれ提案してください。`
+
+期待する動作:
+
+- カスタムエージェント `database-expert` が応答を引き継ぐ
+- 割り当てたスキル `sql-slow-query-troubleshooting` の手順に沿って調査する
+- Application Insights のデータや Azure SQL のメトリクスをツールで取得する
+- SQL dependency が支配的であると特定し、即時緩和策と恒久対策を区別して報告する
+
+メインエージェントとカスタムエージェントの比較:
+
+| 観点 | メインエージェント (ステップ 9) | カスタムエージェント (ステップ 16) |
+|---|---|---|
+| 呼び出し方 | 直接チャット | `/agent` コマンド |
+| 専門性 | 汎用的な Azure 運用知識 | データベースに特化した指示とツール |
+| スキル適用 | グローバルスキルすべて | 割り当てたスキルのみ |
+| 適したケース | 一般的な質問や初期トリアージ | 特定ドメインの深い調査 |
+
+チェックポイント:
+
+- `/agent` でカスタムエージェントを呼び出せている
+- メインエージェントとは異なる、より専門的な調査結果が返される
+- スキルの手順に沿った構造化されたレポートが得られる
+
 ## トラブルシューティング
 
 ### `azd up` が preprovision で失敗する
@@ -493,6 +711,13 @@ Azure SRE Agent を個別に作成した場合は、必要に応じて Azure SRE
 - Azure SRE Agent の作成と利用: https://learn.microsoft.com/azure/sre-agent/usage
 - Azure SRE Agent の権限: https://learn.microsoft.com/azure/sre-agent/permissions
 - Azure SRE Agent のユーザー ロール: https://learn.microsoft.com/azure/sre-agent/user-roles
+- Azure SRE Agent のカスタムエージェント（サブエージェント）: https://learn.microsoft.com/azure/sre-agent/sub-agents
+- Azure SRE Agent のサブエージェント作成チュートリアル: https://learn.microsoft.com/azure/sre-agent/create-subagent
+- Azure SRE Agent のスキル: https://learn.microsoft.com/azure/sre-agent/skills
+- Azure SRE Agent のスキル作成チュートリアル: https://learn.microsoft.com/azure/sre-agent/create-skill
+- Azure SRE Agent の Agent Playground: https://learn.microsoft.com/azure/sre-agent/agent-playground
+- Azure SRE Agent のツール: https://learn.microsoft.com/azure/sre-agent/tools
+- Azure SRE Agent のワークフロー自動化チュートリアル: https://learn.microsoft.com/azure/sre-agent/automate-workflows
 - Azure SQL の Microsoft Entra 認証: https://learn.microsoft.com/azure/azure-sql/database/authentication-aad-overview
 - Azure Cosmos DB for NoSQL のデータプレーン RBAC: https://learn.microsoft.com/azure/cosmos-db/how-to-connect-role-based-access-control
 - Application Insights の失敗調査とトランザクション診断: https://learn.microsoft.com/azure/azure-monitor/app/failures-performance-transactions

@@ -16,6 +16,8 @@
 - azd の単一コマンドで、Azure リソース作成とアプリデプロイを一貫して実行する
 - Azure SRE Agent を別リソースとして作成し、監視対象のリソースグループを関連付ける
 - Application Insights、Azure Monitor、Azure SRE Agent を使って依存関係単位で障害を切り分ける
+- Agent Canvas でカスタムエージェントとスキルを作成し、ドメイン特化の調査を自動化する
+- Agent Playground でカスタムエージェントの動作をテストし、品質を評価する
 - 一時回避と恒久対策を分けて議論できるワークショップを実施する
 
 ## 現在のシナリオ
@@ -94,6 +96,10 @@ SREAgentDBDemo/
 - Azure SRE Agent の作成と利用: https://learn.microsoft.com/azure/sre-agent/usage
 - Azure SRE Agent の権限: https://learn.microsoft.com/azure/sre-agent/permissions
 - Azure SRE Agent のユーザー ロール: https://learn.microsoft.com/azure/sre-agent/user-roles
+- Azure SRE Agent のカスタムエージェント（サブエージェント）: https://learn.microsoft.com/azure/sre-agent/sub-agents
+- Azure SRE Agent のスキル: https://learn.microsoft.com/azure/sre-agent/skills
+- Azure SRE Agent の Agent Playground: https://learn.microsoft.com/azure/sre-agent/agent-playground
+- Azure SRE Agent のワークフロー自動化: https://learn.microsoft.com/azure/sre-agent/automate-workflows
 - Azure SQL の Microsoft Entra 認証: https://learn.microsoft.com/azure/azure-sql/database/authentication-aad-overview
 - Azure Cosmos DB for NoSQL の RBAC: https://learn.microsoft.com/azure/cosmos-db/how-to-connect-role-based-access-control
 - Application Insights の失敗調査とトランザクション診断: https://learn.microsoft.com/azure/azure-monitor/app/failures-performance-transactions

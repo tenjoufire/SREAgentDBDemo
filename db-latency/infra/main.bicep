@@ -487,6 +487,7 @@ resource deadlockAlert 'Microsoft.Insights/metricAlerts@2018-03-01' = {
           operator: 'GreaterThan'
           threshold: 0
           timeAggregation: 'Total'
+            skipMetricValidation: true
           criterionType: 'StaticThresholdCriterion'
         }
       ]
