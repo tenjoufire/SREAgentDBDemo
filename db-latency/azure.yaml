@@ -1,0 +1,27 @@
+name: scenario3-db-latency
+metadata:
+  template: sredemolist-scenario3@0.0.1
+services:
+  api:
+    project: ./src
+    language: dotnet
+    host: containerapp
+    apiVersion: 2024-03-01
+    docker:
+      path: ./Dockerfile
+      remoteBuild: true
+infra:
+  provider: bicep
+  path: ./infra
+  module: main
+hooks:
+  preprovision:
+    windows:
+      shell: pwsh
+      run: ./scripts/azd/preprovision.ps1
+      interactive: false
+  postdeploy:
+    windows:
+      shell: pwsh
+      run: ./scripts/azd/postdeploy.ps1
+      interactive: false
